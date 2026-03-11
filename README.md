@@ -1,3 +1,90 @@
+
+<div align="center">
+
+```
+   SPORTSTENSOR PRESENTS
+--------------------------------------------------------------------------------------------------
+   █████████   █████       ██████   ██████   █████████   ██████   █████   █████████     █████████ 
+  ███▒▒▒▒▒███ ▒▒███       ▒▒██████ ██████   ███▒▒▒▒▒███ ▒▒██████ ▒▒███   ███▒▒▒▒▒███   ███▒▒▒▒▒███
+ ▒███    ▒███  ▒███        ▒███▒█████▒███  ▒███    ▒███  ▒███▒███ ▒███  ▒███    ▒███  ███     ▒▒▒ 
+ ▒███████████  ▒███        ▒███▒▒███ ▒███  ▒███████████  ▒███▒▒███▒███  ▒███████████ ▒███         
+ ▒███▒▒▒▒▒███  ▒███        ▒███ ▒▒▒  ▒███  ▒███▒▒▒▒▒███  ▒███ ▒▒██████  ▒███▒▒▒▒▒███ ▒███         
+ ▒███    ▒███  ▒███      █ ▒███      ▒███  ▒███    ▒███  ▒███  ▒▒█████  ▒███    ▒███ ▒▒███     ███
+ █████   █████ ███████████ █████     █████ █████   █████ █████  ▒▒█████ █████   █████ ▒▒█████████ 
+▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒▒ ▒▒▒▒▒     ▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒    ▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒  
+```                                                                                                                                         
+
+</div>
+
+- [Introduction](#introduction)
+- [How it Works](#how-it-works)
+
+## Introduction
+
+Sportstensor operates the world's first decentralized competition network for sports prediction. We connect global AI talent in a competitive ecosystem where independent developers deploy predictive models, compete against real-world outcomes, and earn rewards based on accuracy.
+
+Almanac is the front end to Sportstensor, a prediction market interface that makes competing and submitting predictions by trading simpler and much more accessible.
+
+## How It Works 
+We implement a two-phase optimization system that rewards miners based on 
+their historical trading performance. The mechanism distributes a fixed budget among eligible 
+participants, prioritizing those who demonstrate consistent profitability and trading volume.
+
+The system tracks trading activity over a rolling 30-day window, organizing trades into daily 
+epochs. For each epoch, it:
+
+1. Calculates Performance Metrics:
+   - ROI (Return on Investment): Profit divided by trading volume
+   - Qualified Volume: Volume from winning trades (after fees)
+   - Trailing Performance: Historical performance across all epochs
+
+2. Applies Eligibility Gates:
+   - Minimum ROI threshold (prevents rewarding unprofitable traders)
+   - Minimum volume requirement (ensures meaningful participation)
+   - Build-up period: Traders must demonstrate consistent activity over multiple epochs
+
+3. Runs Two-Phase Optimization:
+   Phase 1: Maximizes the total qualified volume that can be funded within budget constraints
+   Phase 2: Redistributes payouts to favor higher-ROI traders while maintaining volume targets
+
+4. Allocates Tokens:
+   - Converts optimized scores into token weights
+   - Distributes rewards proportionally based on funded volume and signal strength (ROI)
+   - Enforces diversity caps to prevent any single trader from dominating
+
+### Key Features
+- Dual Pool System: Separate scoring for registered miners vs. general pool traders
+- Volume Decay: Recent activity weighted more heavily than older trades
+- Smooth Transitions: Ramp constraints prevent sudden allocation changes
+- Budget Management: Ensures total payouts never exceed available budget
+- Performance Gating: Only profitable, active traders receive rewards
+
+The system is designed to incentivize high-quality trading signals while maintaining fairness 
+and preventing gaming through volume requirements and historical performance tracking.
+
+
+#### Almanac and Polymarket Setup
+1. Go to **https://beta.almanac.market**  
+2. Create an account
+    - Deploy safe wallet
+    - Sign all approvals
+    - Fund your safe wallet
+3. Connect your Bittensor coldkey:  
+   - Install the Bittensor wallet extension  
+   - Import the coldkey tied to your miner UID  
+   - Link wallet in Almanac settings
+
+
+## Environments
+
+| Network | Netuid |
+| ----------- | -----: |
+| Mainnet     |     41 |
+| Testnet     |    172 |
+
+---
+</div>
+
 # Almanac API Interactive Trading Client
 
 This repository contains a terminal-based trading client for the Almanac prediction markets API, built on top of the reusable `almanac_sdk` Python package.
@@ -34,13 +121,6 @@ The `api_trading.py` script provides an interactive flow to:
 - `api_trading.py`  
   Interactive CLI entrypoint using `almanac_sdk`.
 
-- `almanac_sdk/`  
-  Python SDK package:
-  - `almanac_sdk/client.py` – `AlmanacClient` (sessions, positions, orders, place/cancel, account checks)
-  - `almanac_sdk/clob.py` – CLOB price helpers + env loading + native validator hook
-  - `almanac_sdk/clob_native.py` – `ctypes` wrapper for the native `libclob.so`
-  - `almanac_sdk/constants.py` – API URLs, CLOB host, chain ID, EIP-712 contracts
-
 - `clob/`  
   Native validator library:
   - `clob_lib.c`, `clob_lib.h` – C implementation of `clob_validate`
@@ -54,7 +134,7 @@ The `api_trading.py` script provides an interactive flow to:
 Root `requirements.txt` (for the CLI + SDK) includes:
 
 - **Core**:
-  - `almanac-sdk>=0.0.1`
+  - `almanac-sdk>=0.0.2`
   - `requests`
   - `eth-account`
   - `tabulate`
@@ -72,15 +152,6 @@ pip install -r requirements.txt
 ```
 
 ## Configuration
-
-The client reads credentials from env-style files in the current working directory:
-
-- `api_trading.env` (primary)
-- `config.env` (optional)
-- `.env` (optional)
-
-The helpers treat all these files as merged sources of `KEY=VALUE` pairs (files whose names contain `env`, `config`, or `setting` are considered).
-
 Typical `api_trading.env`:
 
 ```bash
@@ -101,24 +172,6 @@ WALLET1_EOA_PROXY_FUNDER=0x...
 
 `api_trading.py` will prompt you to select which credential set to use at startup.
 
-## Building `almanac_sdk` and the native library
-
-From `almanac_sdk/`:
-
-```bash
-cd almanac_sdk
-pip install -e .
-```
-
-From `clob/` (build the native validator):
-
-```bash
-cd clob
-gcc -fPIC -shared -o libclob.so clob_lib.c -lcurl
-cp libclob.so ../almanac_sdk/almanac_sdk/bin/
-```
-
-`almanac_sdk.almanac_sdk.clob_native` will then load `bin/libclob.so` via `ctypes` on import.
 
 ## Running the trading client
 
