@@ -170,6 +170,11 @@ WALLET1_EOA_WALLET_PK=0x...
 WALLET1_EOA_PROXY_FUNDER=0x...
 ```
 
+make sure activate polymarket approval in Almanac
+https://beta.almanac.market/account#polymarket-api
+<img width="1010" height="298" alt="image" src="https://github.com/user-attachments/assets/da2f54ec-587c-4a62-9f7f-4be9777a6b14" />
+
+
 `api_trading.py` will prompt you to select which credential set to use at startup.
 
 
