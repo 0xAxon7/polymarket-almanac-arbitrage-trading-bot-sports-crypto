@@ -174,6 +174,13 @@ WALLET1_EOA_PROXY_FUNDER=0x...
 
 
 ## Running the trading client
+<img width="971" height="256" alt="image" src="https://github.com/user-attachments/assets/0da44ce1-b23e-417b-be36-21b6334226a2" />
+<img width="966" height="232" alt="image" src="https://github.com/user-attachments/assets/8ec994e7-64b4-44df-b8ac-bc24a14bf210" />
+<img width="970" height="202" alt="image" src="https://github.com/user-attachments/assets/64c2e5be-6316-4760-9adf-8dcdb79effaa" />
+<img width="970" height="827" alt="image" src="https://github.com/user-attachments/assets/f84caa58-0690-4183-9ab2-60778fe3a445" />
+<img width="965" height="145" alt="image" src="https://github.com/user-attachments/assets/e85ab1a9-df4d-4b41-9081-c1b9e53b771b" />
+
+
 
 From the project root:
 
