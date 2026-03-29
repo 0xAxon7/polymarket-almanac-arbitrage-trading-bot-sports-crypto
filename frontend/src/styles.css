@@ -1,0 +1,360 @@
+:root {
+  --bg: #0b1220;
+  --panel: #111b33;
+  --text: #e7eefc;
+  --muted: rgba(231, 238, 252, 0.7);
+  --accent: #4cc9f0;
+  --accent2: #ffd166;
+  --danger: #ff4d6d;
+  --ok: #3ddc97;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: radial-gradient(1200px 700px at 20% 0%, rgba(76, 201, 240, 0.15), transparent 60%),
+    radial-gradient(900px 600px at 90% 10%, rgba(255, 209, 102, 0.12), transparent 55%),
+    var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
+    "Segoe UI Emoji";
+}
+
+#root {
+  height: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 18px;
+}
+
+.container > .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.container > .panel > .row {
+  flex-shrink: 0;
+}
+
+.container > .panel > .app-panel-gap {
+  flex-shrink: 0;
+}
+
+.grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.grid > * {
+  min-height: 0;
+}
+
+.grid-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-controls {
+  flex-shrink: 0;
+}
+
+.grid-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Chart taller than the two table panels */
+.grid-main > .panel.panel-main-section {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.grid-main > .panel.panel-main-section.panel-chart-section {
+  flex: 1.5 1 0;
+}
+
+.grid-main > .panel.panel-main-section.panel-trade-tabs {
+  flex: 2 1 0;
+}
+
+.panel-chart-section > *:not(.chart-body-scroll) {
+  flex-shrink: 0;
+}
+
+.chart-body-scroll {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.chart-price-legend-row {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.chart-inline-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chart-inline-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-inline-legend-line {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.panel-trade-tabs {
+  min-height: 0;
+}
+
+.panel-trade-tabs > .trade-tabs-bar {
+  flex-shrink: 0;
+}
+
+.trade-tabs-bar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.trade-tab-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.trade-tab-btn:hover {
+  color: var(--text);
+  border-color: rgba(76, 201, 240, 0.35);
+}
+
+.trade-tab-btn[aria-selected="true"] {
+  color: var(--text);
+  background: rgba(76, 201, 240, 0.12);
+  border-color: rgba(76, 201, 240, 0.45);
+}
+
+.trade-tab-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.trade-tab-hint {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.panel-trade-tabs .trade-tab-panel .target-trades-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+
+@media (max-width: 980px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+}
+
+.panel {
+  background: rgba(17, 27, 51, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 16px 60px rgba(0, 0, 0, 0.25);
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+input,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+.checkboxLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+button {
+  background: rgba(76, 201, 240, 0.15);
+  border: 1px solid rgba(76, 201, 240, 0.35);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.status {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.danger {
+  color: var(--danger);
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.table th,
+.table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  padding: 8px 4px;
+  vertical-align: top;
+}
+
+.table-compact {
+  font-size: 11px;
+}
+
+.table-compact th,
+.table-compact td {
+  padding: 5px 3px;
+}
+
+.target-trades-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+  margin-top: 2px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  -webkit-overflow-scrolling: touch;
+}
+
+.target-trades-scroll .table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(17, 27, 51, 0.98);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+

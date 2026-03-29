@@ -1,20 +1,9 @@
-# Root + shared
-.DS_Store
-Thumbs.db
-*.log
-.env
-.env.*
-
-# Python (Almanac bot)
-Polymarket-Almanac-Trading-Bot-Python/api_trading.env
-**/__pycache__/
-*.py[cod]
-.venv/
-venv/
-
-# TypeScript (Polymarket bot)
-Polymarket-Trading-Bot-Typescript/node_modules/
-Polymarket-Trading-Bot-Typescript/dist/
-Polymarket-Trading-Bot-Typescript/config.json
-Polymarket-Trading-Bot-Typescript/history.toml
-Polymarket-Trading-Bot-Typescript/price_monitor.toml
+node_modules
+backend/node_modules
+backend/dist
+backend/.env
+frontend/node_modules
+frontend/dist
+frontend/.env
+yarn.lock
+package-lock.json

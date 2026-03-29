@@ -1,88 +1,132 @@
-# Polymarket Arbitrage Trading Bot · Sports & Crypto | Almanac · Copy Trading
+# Polymarket Crypto Copy Trading Bot
 
-**Open-source toolkit for [Polymarket](https://polymarket.com)–style prediction markets:** sports markets via **Almanac** (Sportstensor), automated **crypto** 5-minute Up/Down strategies, and workflows useful for **arbitrage**, **copy trading**, and systematic **trading bot** development.
-
-[![Polymarket](https://img.shields.io/badge/Polymarket-prediction%20markets-blue)](https://polymarket.com)
-[![Sports](https://img.shields.io/badge/Sports-Almanac%20%7C%20Sportstensor-green)](https://beta.almanac.market)
-[![Crypto](https://img.shields.io/badge/Crypto-BTC%20ETH%20SOL%20XRP-orange)](https://polymarket.com)
+A full-stack tool for **Polymarket crypto up/down markets**: live UP/DOWN charts, a **target wallet’s trades** (via the official Data API), and an optional **copy-trading loop** that mirrors fills in dry-run or live mode using the [CLOB client](https://github.com/Polymarket/clob-client).
 
 ---
 
-## What’s in this repository
+## Features
 
-| Project | Stack | Best for |
-|--------|--------|----------|
-| [**Polymarket-Almanac-Trading-Bot-Python**](./Polymarket-Almanac-Trading-Bot-Python/) | Python + `almanac_sdk` | **Sports** prediction markets, Almanac API, **copy trading** / miner-style workflows, Polymarket CLOB prices |
-| [**Polymarket-Trading-Bot-Typescript**](./Polymarket-Trading-Bot-Typescript/) | TypeScript + CLOB | **Crypto** 5m Up/Down bots, dual-limit strategies, simulation vs live trading |
+| Area | Description |
+|------|-------------|
+| **Markets** | BTC/ETH/SOL/XRP **5m** and **15m** buckets from Gamma; auto-advance when the current bucket rolls. |
+| **Chart** | Historical mid from CLOB REST; **live** mids via the backend relaying Polymarket’s **CLOB market WebSocket** (`best_bid_ask` only). |
+| **Target trades** | Single backend poll loop per `(target address, eventId)`; updates pushed over **WebSocket** when the merged trade list changes. Same loop drives **copy** when enabled. |
+| **Copy trading** | **Dry run** (log + activity) or **live** orders (`createAndPostOrder`). Zero-point: two snapshots **300ms** apart; only trades appearing in the second snapshot (and later ticks) are candidates to copy. |
+| **Activity** | In-memory ring buffer + **`/api/copy/ws`** for baseline, simulated, posted, skipped, and error events. |
+| **My trades** | Polls Data API for **`CLOB_FUNDER_ADDRESS`** on the selected **event** while copy is running (same REST shape as target trades; not CLOB user WS). |
 
-Together they cover **Polymarket arbitrage** research (price discovery, limit logic, cross-outcome positioning), **sports** and **crypto** verticals, and building your own **trading bot** on top of official APIs.
+**Trade source:** Polymarket **Data API** `GET /trades` with **`eventId`** (not `market` / condition id), merging **`takerOnly=true`** and **`takerOnly=false`**, deduped, up to **1000** rows per side of the merge.
+
+**Event id:** Resolved from Gamma (`GET /events/slug/{slug}` for bucket slugs, or `markets?condition_ids=…` with slug fallback to embedded `events[0].id`).
 
 ---
 
-## Why traders search for this
+## Architecture
 
-- **Polymarket arbitrage** — Compare outcomes, limit prices, and CLOB depth; automate checks with the Python client or TS monitor.
-- **Copy trading sports** — Almanac / Sportstensor rewards consistent, volume-backed performance; the Python client is built for authenticated Almanac + Polymarket-style execution.
-- **Crypto trading bot** — The TypeScript bot runs **BTC / ETH / Solana / XRP** 5-minute markets with configurable dual limits and optional limit-sell triggers.
-- **Prediction market automation** — Search markets, place signed orders, view positions and P&L (Python); batch limits and period-aware logic (TypeScript).
+```text
+┌─────────────┐     REST/WS      ┌─────────────────┐     HTTPS/WSS      ┌──────────────────┐
+│   React UI  │ ◄──────────────► │ Express + `ws`  │ ◄─────────────────► │ Gamma, Data API, │
+│  (Vite 5173)│                  │ (Node, port     │                    │ CLOB REST + CLOB │
+└─────────────┘                  │  3001 default)  │                    │ market WS         │
+                                 └─────────────────┘                    └──────────────────┘
+```
+
+- **Frontend:** `VITE_API_BASE_URL` empty in dev → Vite proxies `/api` (and WebSocket upgrades) to the backend.
+- **Backend:** One **`targetFeedLoops`** map entry per `lowercase(target)::e{eventId}`; **`copyEnabled`** toggles order placement on top of the same tick that broadcasts **`target_trades`**.
+
+---
+
+## Requirements
+
+- **Node.js** 18+ (or 20+ recommended)
+- **npm** or **yarn** at the repo root (workspaces)
 
 ---
 
 ## Quick start
 
-### 1) Sports · Almanac · Python
-
 ```bash
-cd Polymarket-Almanac-Trading-Bot-Python
-pip install -r requirements.txt
-cp api_trading.env.example api_trading.env
-# Edit api_trading.env (wallets, Polymarket API credentials)
-python api_trading.py
-```
-
-Full setup (wallet, approvals, Bittensor coldkey) → see **[Polymarket-Almanac-Trading-Bot-Python/README.md](./Polymarket-Almanac-Trading-Bot-Python/README.md)**.
-
-### 2) Crypto · Polymarket CLOB · TypeScript
-
-```bash
-cd Polymarket-Trading-Bot-Typescript
+# Install (from repository root)
 npm install
-cp config.json.example config.json
-# Edit config.json (private_key, proxy if needed)
-npm run dev          # simulation
-npm run dev:live     # live orders (use with care)
+
+# Development: backend :3001 + frontend :5173
+npm run dev
 ```
 
-Details → **[Polymarket-Trading-Bot-Typescript/README.md](./Polymarket-Trading-Bot-Typescript/README.md)**.
+Open the UI URL printed by Vite (default **http://localhost:5173**). The API is expected at **http://localhost:3001** unless you set `VITE_API_BASE_URL`.
+
+**Production build**
+
+```bash
+npm run build
+npm run start   # serves compiled backend only; host frontend/dist with any static server and set VITE_API_BASE_URL at build time
+```
 
 ---
 
-## Features at a glance
+## Environment variables (backend)
 
-**Python (Almanac / sports)**  
-Interactive CLI: multi-wallet env, market search, CLOB prices, BUY/SELL via Almanac, positions & orders.
+Create **`backend/.env`** (see `.gitignore`). Common variables:
 
-**TypeScript (crypto)**  
-Auto market discovery by slug, dual limit buys at period start, optional limit sell when bid trigger hits, simulation mode.
+| Variable | Required for | Default |
+|----------|----------------|---------|
+| `PORT` | HTTP server | `3001` |
+| `CLOB_HOST` | CLOB REST | `https://clob.polymarket.com` |
+| `CLOB_CHAIN_ID` | CLOB chain | `137` |
+| `GAMMA_API_BASE_URL` | Market / event metadata | `https://gamma-api.polymarket.com` |
+| `DATA_API_BASE_URL` | Trades feed | `https://data-api.polymarket.com` |
+| `CLOB_WS_URL` | Backend chart relay upstream | `wss://ws-subscriptions-clob.polymarket.com/ws/market` |
+| `CLOB_FUNDER_ADDRESS` | “My trades” + signing context | — |
+| `CLOB_PRIVATE_KEY` | **Live** copy orders | — |
+| `CLOB_SIGNATURE_TYPE` | CLOB client | often `2` |
+| `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASSPHRASE` | Optional L2 creds; else derived | — |
 
----
-
-## SEO keywords (index)
-
-`polymarket arbitrage` · `polymarket trading bot` · `copy trading sports` · `crypto trading bot` · `prediction markets` · `almanac trading` · `sportstensor` · `polymarket clob` · `automated trading` · `5 minute crypto markets`
-
----
-
-## Security & disclaimer
-
-- **Never commit** real private keys, `api_trading.env`, or `config.json` with secrets.
-- Prediction markets involve **risk of loss**. This software is for **education and research**; you are responsible for compliance with applicable laws and platform terms.
-- Start with **simulation** and small size when testing live.
+**Live trading** needs a funded wallet and valid CLOB setup; **misconfiguration can lose funds**. Prefer **dry run** until you understand behavior.
 
 ---
 
-## License & support
+## Notable HTTP routes
 
-See each subproject’s README for dependencies and contacts. Extend either bot for your own **Polymarket arbitrage**, **sports copy trading**, or **crypto bot** stack.
+| Method | Path | Role |
+|--------|------|------|
+| GET | `/api/health` | Health check |
+| GET | `/api/crypto/markets`, `/api/crypto/current` | Crypto bucket list / current market |
+| GET | `/api/chart` | UP/DOWN history + window |
+| GET | `/api/target-trades` | Merged trades (query: `userAddress` + `eventId` or `conditionId`) |
+| POST | `/api/feed/start` | Start watch-only poll + WS `target_trades` |
+| POST | `/api/feed/stop` | Stop that loop entirely |
+| POST | `/api/copy/start` | Enable copy on the same loop key |
+| POST | `/api/copy/stop` | `fullStop: false` → watch-only; `fullStop: true` → remove loop |
+| GET | `/api/copy/activity` | Activity history |
+| GET | `/api/wallet` | Exposes `CLOB_FUNDER_ADDRESS` to the UI |
 
-**Star the repo** if you use it for Almanac, Polymarket, or Sportstensor automation.
+## WebSocket paths
+
+| Path | Query | Payloads |
+|------|--------|----------|
+| `/api/chart/ws` | `upToken`, `downToken`, `startTs`, `endTs` | `chart_mid` |
+| `/api/copy/ws` | `targetAddress`, `eventId` | `subscribed`, `target_trades`, `copy_activity` |
+
+---
+
+## Project layout
+
+```text
+PolyMarket-Crypto-Copy-Trading-Bot/
+├── backend/src/index.ts   # Single server: REST + WS + loops + Gamma/Data/CLOB
+├── frontend/src/          # React + Recharts
+├── package.json           # Workspaces + dev script
+└── README.md
+```
+
+---
+
+## Disclaimer
+
+This software interacts with **real markets** and, in live mode, can **place real orders**. It is provided as-is for educational and operational use at your own risk. You are responsible for keys, compliance, and capital. **Never commit private keys or `.env` files.**
+
+---
+
+## License
+
+ISC (see `package.json` files in workspaces).

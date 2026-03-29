@@ -1,0 +1,27 @@
+# Server
+PORT=3001
+
+# Polymarket CLOB (prices/orderbook/trading)
+CLOB_HOST=https://clob.polymarket.com
+# Polygon mainnet chain id used by CLOB; switch to AMOY if needed
+CLOB_CHAIN_ID=137
+
+# Public endpoints
+GAMMA_API_BASE_URL=https://gamma-api.polymarket.com
+DATA_API_BASE_URL=https://data-api.polymarket.com
+
+# Optional: enabled only if you want to place orders (auto-copy) and fetch "my trades"
+# Keep private keys/secrets out of git.
+# You can either provide full L2 creds, or just the private key and let the backend derive API creds.
+# PRIVATE_KEY must be the L1 wallet private key.
+CLOB_PRIVATE_KEY=
+# Signature type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (default: 2)
+CLOB_SIGNATURE_TYPE=2
+# Funder/proxy address where the funds sit (required for many users)
+CLOB_FUNDER_ADDRESS=
+
+# If you already have L2 API credentials, you can provide them directly (optional).
+CLOB_API_KEY=
+CLOB_SECRET=
+CLOB_PASSPHRASE=
+
