@@ -1,0 +1,22 @@
+{
+  "remote.SSH.defaultForwardedPorts": [
+    {
+      "name": "Vite",
+      "localPort": 5173,
+      "remotePort": 5173
+    },
+    {
+      "name": "Backend API",
+      "localPort": 3001,
+      "remotePort": 3001
+    }
+  ],
+  "remote.portsAttributes": {
+    "5173": {
+      "label": "Vite"
+    },
+    "3001": {
+      "label": "Backend API"
+    }
+  }
+}

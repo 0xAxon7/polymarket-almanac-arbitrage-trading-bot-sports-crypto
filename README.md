@@ -1,6 +1,6 @@
-# Polymarket Crypto Copy Trading Bot
+# Polymarket Copy Trading Bot
 
-A full-stack tool for **Polymarket crypto up/down markets**: live UP/DOWN charts, a **target wallet’s trades** (via the official Data API), and an optional **copy-trading loop** that mirrors fills in dry-run or live mode using the [CLOB client](https://github.com/Polymarket/clob-client).
+A full-stack tool for **Polymarket wallet copy trading** across **any market**: a target wallet’s trades (via the Data API), optional copy-trading (dry-run or live), and real-time copy activity over WebSocket.
 
 ---
 
@@ -8,31 +8,25 @@ A full-stack tool for **Polymarket crypto up/down markets**: live UP/DOWN charts
 
 | Area | Description |
 |------|-------------|
-| **Markets** | BTC/ETH/SOL/XRP **5m** and **15m** buckets from Gamma; auto-advance when the current bucket rolls. |
-| **Chart** | Historical mid from CLOB REST; **live** mids via the backend relaying Polymarket’s **CLOB market WebSocket** (`best_bid_ask` only). |
-| **Target trades** | Single backend poll loop per `(target address, eventId)`; updates pushed over **WebSocket** when the merged trade list changes. Same loop drives **copy** when enabled. |
-| **Copy trading** | **Dry run** (log + activity) or **live** orders (`createAndPostOrder`). Zero-point: two snapshots **300ms** apart; only trades appearing in the second snapshot (and later ticks) are candidates to copy. |
+| **Markets** | Target-trade and copy logic is market-agnostic: it follows the configured wallet across all Polymarket markets. |
+| **Target trades** | Single backend poll loop per `target::global`; updates pushed over **WebSocket** when new trades are detected after copy zero-point seeding. Same loop drives **copy** when enabled. |
+| **Copy trading** | **Dry run** (log + activity) or **live** orders (`createAndPostOrder`). Zero-point: first tick seeds baseline keys and does **not** copy; only later new trades are candidates to copy. |
 | **Activity** | In-memory ring buffer + **`/api/copy/ws`** for baseline, simulated, posted, skipped, and error events. |
-| **My trades** | Polls Data API for **`CLOB_FUNDER_ADDRESS`** on the selected **event** while copy is running (same REST shape as target trades; not CLOB user WS). |
+| **My trades** | Polls Data API for **`CLOB_FUNDER_ADDRESS`** across all markets while copy is running (same REST shape as target trades; not CLOB user WS). |
 
-**Trade source:** Polymarket **Data API** `GET /trades` with **`eventId`** (not `market` / condition id), merging **`takerOnly=true`** and **`takerOnly=false`**, deduped, up to **1000** rows per side of the merge.
-
-**Event id:** Resolved from Gamma (`GET /events/slug/{slug}` for bucket slugs, or `markets?condition_ids=…` with slug fallback to embedded `events[0].id`).
-
----
+**Trade source:** Polymarket **Data API** `GET /activity` with `type=TRADE` (not `/trades`), deduped and normalized.
 
 ## Architecture
 
 ```text
-┌─────────────┐     REST/WS      ┌─────────────────┐     HTTPS/WSS      ┌──────────────────┐
-│   React UI  │ ◄──────────────► │ Express + `ws`  │ ◄─────────────────► │ Gamma, Data API, │
-│  (Vite 5173)│                  │ (Node, port     │                    │ CLOB REST + CLOB │
-└─────────────┘                  │  3001 default)  │                    │ market WS         │
-                                 └─────────────────┘                    └──────────────────┘
+┌─────────────┐     REST/WS      ┌─────────────────┐     HTTPS      ┌──────────────────────────┐
+│   React UI  │ ◄──────────────► │ Express + `ws`  │ ◄────────────► │ Data API + CLOB REST +  │
+│  (Vite 5173)│                  │ (Node, :3001)   │                │ Gamma metadata endpoints │
+└─────────────┘                  └─────────────────┘                └──────────────────────────┘
 ```
 
 - **Frontend:** `VITE_API_BASE_URL` empty in dev → Vite proxies `/api` (and WebSocket upgrades) to the backend.
-- **Backend:** One **`targetFeedLoops`** map entry per `lowercase(target)::e{eventId}`; **`copyEnabled`** toggles order placement on top of the same tick that broadcasts **`target_trades`**.
+- **Backend:** One **`targetFeedLoops`** map entry per `lowercase(target)::global`; **`copyEnabled`** toggles order placement on top of the same tick that can broadcast **`target_trades`** and copy activity.
 
 ---
 
@@ -66,7 +60,7 @@ npm run start   # serves compiled backend only; host frontend/dist with any stat
 
 ## Environment variables (backend)
 
-Create **`backend/.env`** (see `.gitignore`). Common variables:
+Create **`backend/.env`** (see `.gitignore`). Current template (`backend/.env copy.example`) includes:
 
 | Variable | Required for | Default |
 |----------|----------------|---------|
@@ -75,11 +69,17 @@ Create **`backend/.env`** (see `.gitignore`). Common variables:
 | `CLOB_CHAIN_ID` | CLOB chain | `137` |
 | `GAMMA_API_BASE_URL` | Market / event metadata | `https://gamma-api.polymarket.com` |
 | `DATA_API_BASE_URL` | Trades feed | `https://data-api.polymarket.com` |
-| `CLOB_WS_URL` | Backend chart relay upstream | `wss://ws-subscriptions-clob.polymarket.com/ws/market` |
 | `CLOB_FUNDER_ADDRESS` | “My trades” + signing context | — |
 | `CLOB_PRIVATE_KEY` | **Live** copy orders | — |
 | `CLOB_SIGNATURE_TYPE` | CLOB client | often `2` |
-| `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASSPHRASE` | Optional L2 creds; else derived | — |
+
+Optional (not in the example file, but supported):
+
+- `CLOB_API_KEY`
+- `CLOB_SECRET`
+- `CLOB_PASSPHRASE`
+
+If these optional L2 creds are not set, backend auto-derives API creds from `CLOB_PRIVATE_KEY`.
 
 **Live trading** needs a funded wallet and valid CLOB setup; **misconfiguration can lose funds**. Prefer **dry run** until you understand behavior.
 
@@ -90,22 +90,39 @@ Create **`backend/.env`** (see `.gitignore`). Common variables:
 | Method | Path | Role |
 |--------|------|------|
 | GET | `/api/health` | Health check |
-| GET | `/api/crypto/markets`, `/api/crypto/current` | Crypto bucket list / current market |
-| GET | `/api/chart` | UP/DOWN history + window |
-| GET | `/api/target-trades` | Merged trades (query: `userAddress` + `eventId` or `conditionId`) |
+| GET | `/api/target-trades` | Merged recent trades across all markets (query: `userAddress`, optional `limit`) |
 | POST | `/api/feed/start` | Start watch-only poll + WS `target_trades` |
 | POST | `/api/feed/stop` | Stop that loop entirely |
 | POST | `/api/copy/start` | Enable copy on the same loop key |
 | POST | `/api/copy/stop` | `fullStop: false` → watch-only; `fullStop: true` → remove loop |
-| GET | `/api/copy/activity` | Activity history |
+| GET | `/api/copy/activity` | Activity history (`global=true` in current UI flow) |
 | GET | `/api/wallet` | Exposes `CLOB_FUNDER_ADDRESS` to the UI |
 
 ## WebSocket paths
 
 | Path | Query | Payloads |
 |------|--------|----------|
-| `/api/chart/ws` | `upToken`, `downToken`, `startTs`, `endTs` | `chart_mid` |
-| `/api/copy/ws` | `targetAddress`, `eventId` | `subscribed`, `target_trades`, `copy_activity` |
+| `/api/copy/ws` | `targetAddress`, `global=true` | `subscribed`, `target_trades`, `copy_activity` |
+
+## Copy loop behavior (current)
+
+- Poll interval defaults to **250ms** (`/api/copy/start` supports `pollMs`, min 200ms).
+- Each tick fetches **latest 50** target trades from Data API `/activity` (`type=TRADE`, `sortDirection=DESC`), then sorts oldest→newest for deterministic processing.
+- **Zero-point on start:** first tick only seeds dedupe keys (`processedCopyKeys`) and does not copy or send baseline trades to UI.
+- After zero-point, only newly discovered trades (not in `processedCopyKeys`) are:
+  - broadcast as `target_trades` over `/api/copy/ws`
+  - considered for copy (dry-run/live)
+
+---
+
+## Live order posting notes
+
+- `order_posted` means the backend believes posting succeeded.
+- If CLOB returns a structured error (for example `Unauthorized/Invalid api key`), backend now treats it as an **error** event, not success.
+- If you see 401 in logs:
+  - verify `CLOB_PRIVATE_KEY` and `CLOB_FUNDER_ADDRESS` match,
+  - remove stale `CLOB_API_KEY` / `CLOB_SECRET` / `CLOB_PASSPHRASE` so backend can derive fresh API creds,
+  - restart backend after changing `.env`.
 
 ---
 
@@ -114,7 +131,7 @@ Create **`backend/.env`** (see `.gitignore`). Common variables:
 ```text
 PolyMarket-Crypto-Copy-Trading-Bot/
 ├── backend/src/index.ts   # Single server: REST + WS + loops + Gamma/Data/CLOB
-├── frontend/src/          # React + Recharts
+├── frontend/src/          # React UI (target trades + copy activity + my trades)
 ├── package.json           # Workspaces + dev script
 └── README.md
 ```

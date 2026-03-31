@@ -20,37 +20,19 @@ export type MarketTypesResponse = { marketTypes: string[] };
 export type MarketListResponse = {
   markets: { conditionId: string; question: string; slug?: string }[];
 };
-export type Chain = "btc" | "eth" | "sol" | "xrp";
-export type Duration = "5m" | "15m";
-export type CryptoMarketsResponse = {
-  chain: Chain;
-  duration: Duration;
+
+export type BrowseMarketsResponse = {
+  mode: "browse" | "search";
+  q: string;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
   markets: {
     conditionId: string;
     question: string;
     slug?: string;
-    startDate?: string;
-    endDate?: string;
-    /** Gamma/Data API event id when the list payload includes it. */
     eventId?: number;
   }[];
-};
-
-export type CurrentCryptoMarketResponse = {
-  chain: Chain;
-  duration: Duration;
-  nowTs: number;
-  currentBucketStartTs: number;
-  market:
-    | {
-        conditionId: string;
-        question: string;
-        slug?: string;
-        startDate?: string;
-        endDate?: string;
-        eventId?: number;
-      }
-    | null;
 };
 export type MarketMappingResponse = {
   conditionId: string;
@@ -79,6 +61,8 @@ export type TargetTradesResponse = {
     size: number;
     transactionHash: string;
     title: string;
+    conditionId?: string;
+    slug?: string;
   }[];
 };
 
@@ -91,14 +75,17 @@ export async function getMarkets(typeId: string): Promise<MarketListResponse> {
   return apiFetch(`/api/market/list?${params.toString()}`);
 }
 
-export async function getCryptoMarkets(chain: Chain, duration: Duration): Promise<CryptoMarketsResponse> {
-  const params = new URLSearchParams({ chain, duration });
-  return apiFetch(`/api/crypto/markets?${params.toString()}`);
-}
-
-export async function getCurrentCryptoMarket(chain: Chain, duration: Duration): Promise<CurrentCryptoMarketResponse> {
-  const params = new URLSearchParams({ chain, duration });
-  return apiFetch(`/api/crypto/current?${params.toString()}`);
+export async function getBrowseMarkets(args: {
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<BrowseMarketsResponse> {
+  const params = new URLSearchParams();
+  if (args.q?.trim()) params.set("q", args.q.trim());
+  if (args.limit != null) params.set("limit", String(args.limit));
+  if (args.offset != null) params.set("offset", String(args.offset));
+  const q = params.toString();
+  return apiFetch(`/api/markets/browse${q ? `?${q}` : ""}`);
 }
 
 export async function getChart(conditionId: string, slug?: string): Promise<ChartResponse> {
@@ -109,9 +96,10 @@ export async function getChart(conditionId: string, slug?: string): Promise<Char
 
 export async function getTargetTrades(args: {
   userAddress: string;
-  /** Prefer when known; Data API filters by eventId. */
   eventId?: number;
   conditionId?: string;
+  /** Recent trades across all markets (default when conditionId/eventId omitted). */
+  allMarkets?: boolean;
   limit?: number;
 }): Promise<TargetTradesResponse> {
   const params = new URLSearchParams({
@@ -122,16 +110,19 @@ export async function getTargetTrades(args: {
   if (args.eventId != null && Number.isFinite(args.eventId) && args.eventId >= 1) {
     params.set("eventId", String(Math.floor(args.eventId)));
   }
+  const scoped = Boolean(args.conditionId?.trim()) || (args.eventId != null && args.eventId >= 1);
+  if (args.allMarkets === true || !scoped) params.set("allMarkets", "true");
   return apiFetch(`/api/target-trades?${params.toString()}`);
 }
 
 export async function startCopy(args: {
   targetAddress: string;
-  conditionId: string;
+  conditionId?: string;
   eventId?: number;
+  /** Copy any new trade from this wallet on any market. */
+  global?: boolean;
   dryRun?: boolean;
   pollMs?: number;
-  /** Percent of target trade size (outcome shares). Default 100. */
   copySizePercent?: number;
   minCopySize?: number;
   maxCopySize?: number;
@@ -140,16 +131,18 @@ export async function startCopy(args: {
   running: boolean;
   key: string;
   targetAddress: string;
-  conditionId: string;
-  eventId: number;
+  conditionId?: string;
+  eventId?: number;
+  global?: boolean;
 }> {
   const body: Record<string, unknown> = {
     targetAddress: args.targetAddress,
-    conditionId: args.conditionId,
     dryRun: args.dryRun ?? true,
-    pollMs: args.pollMs ?? 5000,
+    pollMs: args.pollMs ?? 250,
     copySizePercent: args.copySizePercent ?? 100,
   };
+  if (args.global === true) body.global = true;
+  if (args.conditionId?.trim()) body.conditionId = args.conditionId.trim();
   if (args.eventId != null && Number.isFinite(args.eventId) && args.eventId >= 1) {
     body.eventId = Math.floor(args.eventId);
   }
@@ -169,10 +162,11 @@ export async function stopCopy(args: {
   targetAddress: string;
   conditionId?: string;
   eventId?: number;
-  /** When true, stops the target trade feed entirely (e.g. market migrate). */
+  global?: boolean;
   fullStop?: boolean;
 }): Promise<{ ok: boolean; alreadyStopped?: boolean; mode?: string }> {
   const body: Record<string, unknown> = { targetAddress: args.targetAddress };
+  if (args.global === true) body.global = true;
   if (args.conditionId?.trim()) body.conditionId = args.conditionId.trim();
   if (args.eventId != null && Number.isFinite(args.eventId) && args.eventId >= 1) {
     body.eventId = Math.floor(args.eventId);
@@ -186,23 +180,26 @@ export async function stopCopy(args: {
 
 export async function startTargetFeed(args: {
   targetAddress: string;
-  conditionId: string;
+  conditionId?: string;
   eventId?: number;
+  global?: boolean;
   pollMs?: number;
 }): Promise<{
   ok: boolean;
   mode: string;
   key: string;
   targetAddress: string;
-  conditionId: string;
-  eventId: number;
+  conditionId?: string;
+  eventId?: number;
+  global?: boolean;
   message?: string;
 }> {
   const body: Record<string, unknown> = {
     targetAddress: args.targetAddress,
-    conditionId: args.conditionId,
-    pollMs: args.pollMs ?? 5000,
+    pollMs: args.pollMs ?? 250,
   };
+  if (args.global === true) body.global = true;
+  if (args.conditionId?.trim()) body.conditionId = args.conditionId.trim();
   if (args.eventId != null && Number.isFinite(args.eventId) && args.eventId >= 1) {
     body.eventId = Math.floor(args.eventId);
   }
@@ -216,8 +213,10 @@ export async function stopTargetFeed(args: {
   targetAddress: string;
   conditionId?: string;
   eventId?: number;
+  global?: boolean;
 }): Promise<{ ok: boolean; alreadyStopped?: boolean }> {
   const body: Record<string, unknown> = { targetAddress: args.targetAddress };
+  if (args.global === true) body.global = true;
   if (args.conditionId?.trim()) body.conditionId = args.conditionId.trim();
   if (args.eventId != null && Number.isFinite(args.eventId) && args.eventId >= 1) {
     body.eventId = Math.floor(args.eventId);
@@ -254,12 +253,14 @@ export async function getCopyActivity(args: {
   targetAddress: string;
   conditionId?: string;
   eventId?: number;
+  global?: boolean;
   limit?: number;
 }): Promise<CopyActivityResponse> {
   const params = new URLSearchParams({
     targetAddress: args.targetAddress,
     limit: String(args.limit ?? 50),
   });
+  if (args.global === true) params.set("global", "true");
   if (args.conditionId?.trim()) params.set("conditionId", args.conditionId.trim());
   if (args.eventId != null && Number.isFinite(args.eventId) && args.eventId >= 1) {
     params.set("eventId", String(Math.floor(args.eventId)));
@@ -268,8 +269,16 @@ export async function getCopyActivity(args: {
 }
 
 /** WebSocket: `target_trades` + `copy_activity` on the same session key. */
-export function getCopyActivityWsUrl(targetAddress: string, eventId: number): string {
-  const params = new URLSearchParams({ targetAddress, eventId: String(Math.floor(eventId)) });
+export function getCopyActivityWsUrl(
+  targetAddress: string,
+  opts: { global: true } | { global?: false; eventId: number },
+): string {
+  const params = new URLSearchParams({ targetAddress });
+  if (opts.global === true) {
+    params.set("global", "true");
+  } else {
+    params.set("eventId", String(Math.floor(opts.eventId)));
+  }
   const path = `/api/copy/ws?${params.toString()}`;
   if (API_BASE_URL.startsWith("http://") || API_BASE_URL.startsWith("https://")) {
     return `${API_BASE_URL.replace(/^http/, "ws")}${path}`;

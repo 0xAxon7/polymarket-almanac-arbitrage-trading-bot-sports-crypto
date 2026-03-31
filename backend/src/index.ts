@@ -12,6 +12,7 @@ import {
 } from "@polymarket/clob-client";
 import { Wallet } from "ethers";
 import log from "@slackgram/logger";
+
 dotenv.config();
 
 const app = express();
@@ -63,9 +64,16 @@ function normalizeConditionId(id: string): string {
   return id.trim().toLowerCase();
 }
 
-/** Data API trade fetch limit (merged takerOnly true + false per request). */
+/** Max rows we aggregate for copy / target UI (may span multiple `/activity` pages). */
 const COPY_TRADE_FETCH_LIMIT = 1000;
-const COPY_ZERO_POINT_DELAY_MS = 300;
+/** Polymarket Data API `GET /activity` maximum `limit` per request. */
+const DATA_ACTIVITY_PAGE_LIMIT = 500;
+/** Default poll interval for copy / watch loops (ms). */
+const COPY_POLL_MS_DEFAULT = 250;
+const PROCESSED_COPY_KEYS_MAX = 6000;
+
+/** CLOB tick size + neg-risk rarely change; avoids 2 round-trips per live copy on same token. */
+const tokenMetaCache = new Map<string, { tickSize: string; negRisk: boolean }>();
 
 function tradeDedupeKey(t: {
   transactionHash?: unknown;
@@ -76,13 +84,17 @@ function tradeDedupeKey(t: {
   return `${String(t.transactionHash ?? "")}:${String(t.side ?? "")}:${String(t.price ?? "")}:${String(t.size ?? "")}`;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /** Gamma `events[0].id` for Data API `eventId` (integer). */
 function parseGammaEventId(market: { events?: { id?: string | number }[] }): number | undefined {
   const raw = market.events?.[0]?.id;
+  const n = typeof raw === "string" ? Number(raw) : Number(raw);
+  if (!Number.isFinite(n) || n < 1) return undefined;
+  return Math.floor(n);
+}
+
+/** Event root `id` from Gamma public-search (markets often omit `events[]`). */
+function eventIdFromGammaRoot(raw: unknown): number | undefined {
+  if (raw === null || raw === undefined) return undefined;
   const n = typeof raw === "string" ? Number(raw) : Number(raw);
   if (!Number.isFinite(n) || n < 1) return undefined;
   return Math.floor(n);
@@ -333,6 +345,118 @@ app.get("/api/market/list", async (req, res) => {
       slug: m.slug as string | undefined,
     })),
   });
+});
+
+type GammaMarketListRow = {
+  conditionId?: string;
+  question?: string;
+  slug?: string;
+  acceptingOrders?: boolean;
+  active?: boolean;
+  closed?: boolean;
+  events?: { id?: string | number }[];
+};
+
+/**
+ * All Polymarket markets: volume-ordered browse (empty q) or public-search (q set).
+ * Search results are capped to one API page; browse supports offset pagination.
+ */
+app.get("/api/markets/browse", async (req, res) => {
+  const schema = z.object({
+    q: z.string().optional().default(""),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(40),
+    offset: z.coerce.number().int().min(0).optional().default(0),
+  });
+  const parsed = schema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const { q, limit, offset } = parsed.data;
+  const qTrim = q.trim();
+
+  try {
+    if (qTrim) {
+      type SearchEv = { id?: string | number; markets?: GammaMarketListRow[] };
+      const searchUrl = new URL(`${GAMMA_API_BASE_URL}/public-search`);
+      searchUrl.searchParams.set("q", qTrim);
+      searchUrl.searchParams.set("events_status", "active");
+      searchUrl.searchParams.set("limit_per_type", String(Math.min(80, Math.max(limit, 50))));
+      searchUrl.searchParams.set("page", "1");
+      const data = await fetchJson<{ events?: SearchEv[] }>(searchUrl.toString());
+
+      type Out = {
+        conditionId: string;
+        question: string;
+        slug?: string;
+        eventId?: number;
+      };
+      const rows: Out[] = [];
+      for (const ev of data.events ?? []) {
+        const parentEid = eventIdFromGammaRoot(ev.id);
+        for (const m of ev.markets ?? []) {
+          const cid = String(m.conditionId ?? "").trim();
+          if (!cid) continue;
+          const eid = parseGammaEventId(m) ?? parentEid;
+          rows.push({
+            conditionId: cid,
+            question: String(m.question ?? m.slug ?? cid),
+            slug: m.slug as string | undefined,
+            ...(eid != null ? { eventId: eid } : {}),
+          });
+        }
+      }
+      const seen = new Set<string>();
+      const unique = rows.filter((r) => {
+        if (seen.has(r.conditionId)) return false;
+        seen.add(r.conditionId);
+        return true;
+      });
+      const page = unique.slice(0, limit);
+      return res.json({
+        mode: "search" as const,
+        q: qTrim,
+        limit,
+        offset: 0,
+        markets: page,
+        hasMore: false,
+      });
+    }
+
+    const url = new URL(`${GAMMA_API_BASE_URL}/markets`);
+    url.searchParams.set("closed", "false");
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("offset", String(offset));
+    url.searchParams.set("order", "volumeNum");
+    url.searchParams.set("ascending", "false");
+
+    const arr = await fetchJson<GammaMarketListRow[]>(url.toString());
+    const markets = arr
+      .map((m) => {
+        const cid = String(m.conditionId ?? "").trim();
+        if (!cid) return null;
+        const eid = parseGammaEventId(m);
+        return {
+          conditionId: cid,
+          question: String(m.question ?? m.slug ?? cid),
+          slug: m.slug as string | undefined,
+          ...(eid != null ? { eventId: eid } : {}),
+        };
+      })
+      .filter((m): m is NonNullable<typeof m> => m != null);
+
+    return res.json({
+      mode: "browse" as const,
+      q: "",
+      limit,
+      offset,
+      markets,
+      hasMore: markets.length === limit,
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      error: err?.message ?? String(err),
+      detail: { q: qTrim, limit, offset },
+    });
+  }
 });
 
 app.get("/api/crypto/markets", async (req, res) => {
@@ -633,57 +757,135 @@ app.get("/api/chart", async (req, res) => {
   }
 });
 
-/** Same merge as Target Trades UI: takerOnly true + false, deduped. Sorted oldest → newest for copy processing. */
-async function fetchMergedTradesForUserEvent(
-  userAddress: string,
-  eventId: number,
-  tradeLimit: number,
-): Promise<any[]> {
-  const makeTradesUrl = (takerOnly: boolean) => {
-    const url = new URL(`${DATA_API_BASE_URL}/trades`);
-    url.searchParams.set("user", userAddress.trim());
-    url.searchParams.set("eventId", String(Math.floor(eventId)));
-    url.searchParams.set("limit", String(tradeLimit));
-    url.searchParams.set("takerOnly", takerOnly ? "true" : "false");
-    return url.toString();
-  };
-  const [tradesTakerOnly, tradesAll] = await Promise.all([
-    fetchJson<any[]>(makeTradesUrl(true)),
-    fetchJson<any[]>(makeTradesUrl(false)),
-  ]);
+/**
+ * Data API `GET /activity` with `type=TRADE` (replaces `/trades` + takerOnly merge).
+ * Pages with DESC timestamp so we collect the newest `maxRows` fills, then sort oldest → newest for copy logic.
+ */
+async function fetchUserTradeActivities(params: {
+  userAddress: string;
+  maxRows: number;
+  eventId?: number;
+}): Promise<any[]> {
+  const userAddress = params.userAddress.trim();
+  const cap = Math.min(Math.max(1, params.maxRows), COPY_TRADE_FETCH_LIMIT);
   const merged = new Map<string, any>();
-  for (const t of tradesTakerOnly) merged.set(tradeDedupeKey(t), t);
-  for (const t of tradesAll) merged.set(tradeDedupeKey(t), t);
+  let offset = 0;
+
+  while (merged.size < cap && offset <= 10_000) {
+    const pageSize = Math.min(DATA_ACTIVITY_PAGE_LIMIT, cap - merged.size);
+    const url = new URL(`${DATA_API_BASE_URL}/activity`);
+    url.searchParams.set("user", userAddress);
+    url.searchParams.append("type", "TRADE");
+    url.searchParams.set("limit", String(pageSize));
+    url.searchParams.set("offset", String(offset));
+    url.searchParams.set("sortBy", "TIMESTAMP");
+    url.searchParams.set("sortDirection", "DESC");
+    if (params.eventId != null && Number.isFinite(params.eventId) && params.eventId >= 1) {
+      url.searchParams.append("eventId", String(Math.floor(params.eventId)));
+    }
+
+    const batch = await fetchJson<any[]>(url.toString());
+    if (!Array.isArray(batch) || batch.length === 0) {
+      // This is the snapshot fetch path used by `GET /api/target-trades` (Refresh trades).
+      // eslint-disable-next-line no-console
+      // log.info("[target-trades:snapshot] No trades found");
+      break;
+    }
+
+    for (const a of batch) {
+      if (String(a?.type ?? "").toUpperCase() !== "TRADE") continue;
+      merged.set(tradeDedupeKey(a), a);
+      if (merged.size >= cap) break;
+    }
+    // eslint-disable-next-line no-console
+    // log.info("[target-trades:snapshot] Trades found", batch.length);
+
+    if (batch.length < pageSize) {
+      // eslint-disable-next-line no-console
+      log.info("[target-trades:snapshot] Less than page size", batch.length, pageSize);
+      break;
+    }
+    offset += batch.length;
+  }
+
   return Array.from(merged.values()).sort(
     (a, b) => tradeTimestampSeconds(a.timestamp) - tradeTimestampSeconds(b.timestamp),
   );
 }
 
+async function fetchMergedTradesForUserAllMarkets(userAddress: string, tradeLimit: number): Promise<any[]> {
+  return fetchUserTradeActivities({ userAddress, maxRows: tradeLimit });
+}
+
+/**
+ * Fetch latest TRADE activities (newest first upstream), then normalize to oldest→newest.
+ * Used by polling loop without a `start` window.
+ */
+async function fetchLatestTradeActivities(params: {
+  userAddress: string;
+  eventId?: number;
+  maxRows?: number;
+}): Promise<any[]> {
+  const userAddress = params.userAddress.trim();
+  const cap = Math.min(params.maxRows ?? 50, COPY_TRADE_FETCH_LIMIT);
+  const out: any[] = [];
+  const seen = new Set<string>();
+  const url = new URL(`${DATA_API_BASE_URL}/activity`);
+  url.searchParams.set("user", userAddress);
+  url.searchParams.append("type", "TRADE");
+  url.searchParams.set("limit", String(cap));
+  url.searchParams.set("offset", "0");
+  url.searchParams.set("sortBy", "TIMESTAMP");
+  url.searchParams.set("sortDirection", "DESC");
+  if (params.eventId != null && Number.isFinite(params.eventId) && params.eventId >= 1) {
+    url.searchParams.append("eventId", String(Math.floor(params.eventId)));
+  }
+
+  const batch = await fetchJson<any[]>(url.toString());
+  if (!Array.isArray(batch) || batch.length === 0) 
+    {
+      // eslint-disable-next-line no-console
+      log.info("[target-trades:snapshot] No trades found");
+      return [];
+    }
+
+  for (const a of batch) {
+    if (String(a?.type ?? "").toUpperCase() !== "TRADE") continue;
+    const k = tradeDedupeKey(a);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(a);
+    if (out.length >= cap) break;
+  }
+  // eslint-disable-next-line no-console
+  // log.info("[target-trades:snapshot] Trades found", out.length);
+  return out.sort((a, b) => tradeTimestampSeconds(a.timestamp) - tradeTimestampSeconds(b.timestamp));
+}
+
+function copyAttemptKey(t: any): string {
+  const ts = tradeTimestampSeconds(t.timestamp);
+  return `${ts}:${tradeDedupeKey(t)}:${String(t.outcomeIndex ?? "")}:${String(t.side ?? "")}`;
+}
+
 app.get("/api/target-trades", async (req, res) => {
-  const schema = z
-    .object({
-      conditionId: z.string().min(1).optional(),
-      eventId: z.coerce.number().int().min(1).optional(),
-      userAddress: z.string().min(1),
-      limit: z.coerce.number().int().min(1).max(10000).optional(),
-    })
-    .refine((d) => Boolean(d.conditionId?.trim()) || (d.eventId != null && d.eventId >= 1), {
-      message: "Provide eventId or conditionId",
-      path: ["eventId"],
-    });
+  const schema = z.object({
+    conditionId: z.string().min(1).optional(),
+    eventId: z.coerce.number().int().min(1).optional(),
+    userAddress: z.string().min(1),
+    limit: z.coerce.number().int().min(1).max(10000).optional(),
+    /** When true (or no event scope), return recent trades across all markets for the user. */
+    allMarkets: z.enum(["true", "false"]).optional(),
+  });
 
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { conditionId, userAddress, limit = COPY_TRADE_FETCH_LIMIT } = parsed.data;
-  const tradeLimit = Math.min(limit, COPY_TRADE_FETCH_LIMIT);
-
   try {
-    const eventId =
-      parsed.data.eventId != null && Number.isFinite(parsed.data.eventId) && parsed.data.eventId >= 1
-        ? Math.floor(parsed.data.eventId)
-        : await getEventIdForCondition(conditionId!);
-    const sortedAsc = await fetchMergedTradesForUserEvent(userAddress, eventId, tradeLimit);
+    // Current UI only uses "all markets" (global=true). Event-scoped support is intentionally removed
+    // to keep the hot path small and fast.
+    const { userAddress, limit = COPY_TRADE_FETCH_LIMIT } = parsed.data;
+    const tradeLimit = Math.min(limit, COPY_TRADE_FETCH_LIMIT);
+    const sortedAsc = await fetchMergedTradesForUserAllMarkets(userAddress, tradeLimit);
     const trades = sortedAsc
       .slice()
       .sort((a, b) => tradeTimestampSeconds(b.timestamp) - tradeTimestampSeconds(a.timestamp));
@@ -698,6 +900,8 @@ app.get("/api/target-trades", async (req, res) => {
         size: t.size as number,
         transactionHash: t.transactionHash as string,
         title: t.title as string,
+        conditionId: typeof t.conditionId === "string" ? t.conditionId : undefined,
+        slug: typeof t.slug === "string" ? t.slug : undefined,
       })),
     });
   } catch (err: any) {
@@ -707,9 +911,6 @@ app.get("/api/target-trades", async (req, res) => {
 
 // -------- Target trade feed + optional copy-trading (single poll loop per target::event) --------
 
-/** First snapshot had no trades — every later fill is treated as new until the watermark advances. */
-const COPY_ZERO_POINT_NO_TRADES_YET = -1;
-
 type TargetFeedLoopState = {
   timer?: NodeJS.Timeout;
   pollMs: number;
@@ -717,20 +918,41 @@ type TargetFeedLoopState = {
   eventIdNum: number;
   marketTrim: string;
   key: string;
-  /** Dedupe WS pushes of target trades to the UI. */
+  /** Poll all markets for this wallet (Data API without eventId). */
+  isGlobal?: boolean;
+  mappingByCondition?: Map<string, MarketMapping>;
   lastTradesFingerprint?: string;
-  /** When false, only fetch + broadcast trades (no copy / zero-point). */
   copyEnabled: boolean;
-  zeroPointDone?: boolean;
-  lastSeenTimestamp?: number;
-  lastSeenTradeKey?: string;
   dryRun?: boolean;
   copySizing?: { sizePercent: number; minSize?: number; maxSize?: number };
   mapping?: MarketMapping;
   l2Client?: any | null;
+  /** Unix sec when loop started. */
+  copyStartedAtSec: number;
+  /** Merged TRADE rows for WS (chronological). */
+  recentTradesForUi: any[];
+  /** Avoid duplicate copy attempts across polls. */
+  processedCopyKeys: Set<string>;
+  /** One baseline message per copy session. */
+  copyBaselineSent?: boolean;
+  /** Seed processedCopyKeys on the first tick so we don't copy historical baseline fills. */
+  zeroPointSeedDone?: boolean;
+  /** Prevents overlapping ticks when fetch+copy exceeds pollMs. */
+  tickInFlight?: boolean;
 };
 
 const targetFeedLoops = new Map<string, TargetFeedLoopState>();
+
+function stopAllFeedLoopsForUser(userTrim: string, exceptKey?: string) {
+  const low = userTrim.trim().toLowerCase();
+  for (const [k, s] of [...targetFeedLoops.entries()]) {
+    if (exceptKey && k === exceptKey) continue;
+    if (s.userTrim.trim().toLowerCase() === low) {
+      if (s.timer) clearInterval(s.timer);
+      targetFeedLoops.delete(k);
+    }
+  }
+}
 
 // -------- Backend relay: Polymarket CLOB market WS → browser (best_bid_ask mid only) --------
 type ChartRelaySession = {
@@ -911,6 +1133,21 @@ function subscribeCopyActivityWs(loopKey: string, ws: WebSocket) {
     ws.off("close", onClose);
   };
   ws.on("close", onClose);
+
+  // Avoid "target trades never appear" when the first tick broadcast happens
+  // before the browser finishes subscribing. Send the current buffered state once.
+  try {
+    const s = targetFeedLoops.get(loopKey);
+    if (s?.recentTradesForUi?.length) {
+      const payload = JSON.stringify({
+        type: "target_trades",
+        trades: mapTradesForWire(s.recentTradesForUi),
+      });
+      if (ws.readyState === 1) ws.send(payload);
+    }
+  } catch {
+    // ignore send errors
+  }
 }
 
 function broadcastCopyActivity(loopKey: string, row: CopyActivityEvent) {
@@ -951,11 +1188,18 @@ function getCopyLoopKey(targetAddress: string, eventId: number) {
   return `${targetAddress.trim().toLowerCase()}::e${Math.floor(eventId)}`;
 }
 
+/** All-markets copy/watch: one loop per target wallet. */
+function getGlobalCopyLoopKey(targetAddress: string) {
+  return `${targetAddress.trim().toLowerCase()}::global`;
+}
+
 async function copyLoopKeyFromParams(
   targetAddress: string,
   conditionId: string | undefined,
   eventId: number | undefined,
+  global?: boolean,
 ): Promise<string> {
+  if (global) return getGlobalCopyLoopKey(targetAddress);
   if (eventId != null && Number.isFinite(eventId) && eventId >= 1) {
     return getCopyLoopKey(targetAddress, Math.floor(eventId));
   }
@@ -963,7 +1207,7 @@ async function copyLoopKeyFromParams(
     const eid = await getEventIdForCondition(conditionId);
     return getCopyLoopKey(targetAddress, eid);
   }
-  throw new Error("conditionId or eventId required");
+  throw new Error("conditionId, eventId, or global=true required");
 }
 
 function fingerprintTrades(sorted: any[]): string {
@@ -980,6 +1224,8 @@ function mapTradesForWire(sorted: any[]) {
     size: t.size as number,
     transactionHash: t.transactionHash as string,
     title: t.title as string,
+    conditionId: typeof t.conditionId === "string" ? t.conditionId : undefined,
+    slug: typeof t.slug === "string" ? t.slug : undefined,
   }));
 }
 
@@ -1005,207 +1251,323 @@ function maybeBroadcastTradesIfChanged(s: TargetFeedLoopState, sorted: any[]) {
   broadcastTargetTrades(s.key, mapTradesForWire(sorted));
 }
 
+function trimProcessedCopyKeys(s: TargetFeedLoopState) {
+  if (s.processedCopyKeys.size <= PROCESSED_COPY_KEYS_MAX) return;
+  const arr = [...s.processedCopyKeys];
+  s.processedCopyKeys = new Set(arr.slice(-Math.floor(PROCESSED_COPY_KEYS_MAX / 2)));
+}
+
+function mergeTradesIntoStateAndBroadcast(s: TargetFeedLoopState, newRows: any[]) {
+  const map = new Map<string, any>();
+  for (const t of s.recentTradesForUi) {
+    map.set(tradeDedupeKey(t), t);
+  }
+  for (const t of newRows) {
+    if (String(t?.type ?? "").toUpperCase() !== "TRADE") continue;
+    map.set(tradeDedupeKey(t), t);
+  }
+  const merged = Array.from(map.values()).sort(
+    (a, b) => tradeTimestampSeconds(a.timestamp) - tradeTimestampSeconds(b.timestamp),
+  );
+  s.recentTradesForUi = merged.slice(-COPY_TRADE_FETCH_LIMIT);
+  maybeBroadcastTradesIfChanged(s, s.recentTradesForUi);
+}
+
+/** Prefer Data API `asset` (CLOB token id); else map UP/DOWN / outcome index to binary mapping. */
+function resolveTokenIdFromTrade(t: any, mapping: MarketMapping | undefined): string {
+  const raw = String(t.asset ?? "").trim();
+  if (/^\d+$/.test(raw)) return raw;
+  if (!mapping) return "";
+  const outcomeLabel = String(t.outcome ?? "").toLowerCase();
+  if (outcomeLabel.includes("up")) return mapping.up.tokenId;
+  if (outcomeLabel.includes("down")) return mapping.down.tokenId;
+  const idx = Number(t.outcomeIndex);
+  return idx === 0 ? mapping.up.tokenId : mapping.down.tokenId;
+}
+
 async function runTargetFeedTick(key: string) {
-  const s = targetFeedLoops.get(key);
-  if (!s) return;
+  const s0 = targetFeedLoops.get(key);
+  if (!s0) return;
+  if (s0.tickInFlight) return;
+  s0.tickInFlight = true;
   const clobPublic = getClobPublicClient();
 
-  const applyCopyForTrade = async (t: any) => {
-    const cur = targetFeedLoops.get(key);
-    if (!cur?.copyEnabled || !cur.mapping || cur.copySizing == null || cur.dryRun === undefined) return;
-
-    const ts = tradeTimestampSeconds(t.timestamp);
-    const tradeKey = `${ts}:${t.transactionHash}:${t.outcomeIndex}:${t.side}`;
-    const outcomeLabel = String(t.outcome ?? "").toLowerCase();
-    const mapping = cur.mapping;
-    const tokenId = outcomeLabel.includes("up")
-      ? mapping.up.tokenId
-      : outcomeLabel.includes("down")
-        ? mapping.down.tokenId
-        : t.outcomeIndex === 0
-          ? mapping.up.tokenId
-          : mapping.down.tokenId;
-
-    const price = Number(t.price);
-    const side = (t.side as string) as Side;
-    const { size: orderSize, skip: sizeSkip } = computeCopyOrderSize(Number(t.size), cur.copySizing);
-
-    if (sizeSkip) {
-      pushCopyActivity(key, {
-        kind: "skipped",
-        dryRun: cur.dryRun,
-        side: String(t.side ?? ""),
-        price,
-        size: Number(t.size),
-        outcome: String(t.outcome ?? ""),
-        targetTransactionHash: String(t.transactionHash ?? ""),
-        message: sizeSkip,
-      });
-      cur.lastSeenTimestamp = ts;
-      cur.lastSeenTradeKey = tradeKey;
-      return;
-    }
-
-    if (cur.dryRun) {
-      // eslint-disable-next-line no-console
-      log.info("[copy:dryRun]", {
-        tokenId,
-        price: t.price,
-        size: orderSize,
-        targetSize: t.size,
-        side: t.side,
-        transactionHash: t.transactionHash,
-      });
-      pushCopyActivity(key, {
-        kind: "simulated",
-        dryRun: true,
-        side: String(t.side ?? ""),
-        price,
-        size: orderSize,
-        outcome: String(t.outcome ?? ""),
-        targetTransactionHash: String(t.transactionHash ?? ""),
-      });
-      cur.lastSeenTimestamp = ts;
-      cur.lastSeenTradeKey = tradeKey;
-      return;
-    }
-
-    const l2 = cur.l2Client;
-    if (!l2) return;
-
-    const tickSize =
-      mapping.tickSize ?? (await clobPublic.getTickSize(tokenId)).toString();
-    const negRisk =
-      typeof mapping.negRisk === "boolean" ? mapping.negRisk : await clobPublic.getNegRisk(tokenId);
-
-    try {
-      await l2.createAndPostOrder(
-        {
-          tokenID: tokenId,
-          price,
-          size: orderSize,
-          side,
-        },
-        {
-          tickSize: tickSize as any,
-          negRisk,
-        },
-        OrderType.GTC,
-      );
-      pushCopyActivity(key, {
-        kind: "order_posted",
-        dryRun: false,
-        side: String(t.side ?? ""),
-        price,
-        size: orderSize,
-        outcome: String(t.outcome ?? ""),
-        targetTransactionHash: String(t.transactionHash ?? ""),
-      });
-    } catch (orderErr: any) {
-      pushCopyActivity(key, {
-        kind: "error",
-        dryRun: false,
-        side: String(t.side ?? ""),
-        price,
-        size: orderSize,
-        outcome: String(t.outcome ?? ""),
-        targetTransactionHash: String(t.transactionHash ?? ""),
-        message: orderErr?.message ?? String(orderErr),
-      });
-      cur.lastSeenTimestamp = ts;
-      cur.lastSeenTradeKey = tradeKey;
-      return;
-    }
-
-    cur.lastSeenTimestamp = ts;
-    cur.lastSeenTradeKey = tradeKey;
-  };
-
-  const setWatermarkFromSnapshot = (snap: any[]) => {
-    if (snap.length === 0) {
-      s.lastSeenTimestamp = COPY_ZERO_POINT_NO_TRADES_YET;
-      s.lastSeenTradeKey = "";
-      return;
-    }
-    const last = snap[snap.length - 1]!;
-    const ts0 = tradeTimestampSeconds(last.timestamp);
-    const tradeKey0 = `${ts0}:${last.transactionHash}:${last.outcomeIndex}:${last.side}`;
-    s.lastSeenTimestamp = ts0;
-    s.lastSeenTradeKey = tradeKey0;
-  };
-
   try {
-    if (s.copyEnabled && !s.zeroPointDone) {
-      const snap1 = await fetchMergedTradesForUserEvent(s.userTrim, s.eventIdNum, COPY_TRADE_FETCH_LIMIT);
-      await sleep(COPY_ZERO_POINT_DELAY_MS);
-      const snap2 = await fetchMergedTradesForUserEvent(s.userTrim, s.eventIdNum, COPY_TRADE_FETCH_LIMIT);
+    const s = targetFeedLoops.get(key);
+    if (!s) return;
+    const pollBeginSec = Math.floor(Date.now() / 1000);
+    // eslint-disable-next-line no-console
+    // log.info(
+    //   `[feed:tick:start] key=${key} copyEnabled=${s.copyEnabled} dryRun=${String(s.dryRun)} pollBeginSec=${pollBeginSec} pollMs=${s.pollMs}`,
+    // );
 
-      const keys1 = new Set(snap1.map((x) => tradeDedupeKey(x)));
-      const newSinceFirst = snap2.filter((x) => !keys1.has(tradeDedupeKey(x)));
-      newSinceFirst.sort(
-        (a, b) => tradeTimestampSeconds(a.timestamp) - tradeTimestampSeconds(b.timestamp),
-      );
+    const applyCopyForTrade = async (t: any) => {
+      const cur = targetFeedLoops.get(key);
+      if (!cur?.copyEnabled || cur.copySizing == null || cur.dryRun === undefined) return;
 
-      s.zeroPointDone = true;
+      let mapping: MarketMapping | undefined = cur.mapping;
+      if (cur.isGlobal && t.conditionId) {
+        const cid = normalizeConditionId(String(t.conditionId));
+        if (!cur.mappingByCondition) cur.mappingByCondition = new Map();
+        if (!cur.mappingByCondition.has(cid)) {
+          try {
+            cur.mappingByCondition.set(cid, await mapConditionIdToUpDown(cid));
+          } catch {
+            /* token may still resolve via t.asset */
+          }
+        }
+        mapping = cur.mappingByCondition.get(cid) ?? mapping;
+      }
 
-      maybeBroadcastTradesIfChanged(s, snap2);
-
-      if (snap2.length === 0) {
-        setWatermarkFromSnapshot(snap2);
+      const tokenId = resolveTokenIdFromTrade(t, mapping);
+      if (!tokenId) {
         pushCopyActivity(key, {
-          kind: "baseline",
-          dryRun: s.dryRun ?? true,
-          message: `Zero point: empty feed (eventId ${s.eventIdNum}). After ${COPY_ZERO_POINT_DELAY_MS}ms still empty — future fills will be copied.`,
+          kind: "skipped",
+          dryRun: cur.dryRun,
+          side: String(t.side ?? ""),
+          price: Number(t.price),
+          size: Number(t.size),
+          outcome: String(t.outcome ?? ""),
+          targetTransactionHash: String(t.transactionHash ?? ""),
+          message: "Could not resolve CLOB token (missing asset on trade and no market mapping).",
         });
         return;
       }
 
-      pushCopyActivity(key, {
-        kind: "baseline",
-        dryRun: s.dryRun ?? true,
-        message:
-          newSinceFirst.length > 0
-            ? `Zero point: first snapshot, then ${COPY_ZERO_POINT_DELAY_MS}ms later a second snapshot — ${newSinceFirst.length} new trade(s) in that window; copying those now. Later fills use the poll loop.`
-            : `Zero point: no new trades in the ${COPY_ZERO_POINT_DELAY_MS}ms window; baseline is the latest trade in the second snapshot (not copied).`,
-      });
+      const price = Number(t.price);
+      const side = (t.side as string) as Side;
+      const { size: orderSize, skip: sizeSkip } = computeCopyOrderSize(Number(t.size), cur.copySizing);
 
-      for (const t of newSinceFirst) {
-        await applyCopyForTrade(t);
+      if (sizeSkip) {
+        pushCopyActivity(key, {
+          kind: "skipped",
+          dryRun: cur.dryRun,
+          side: String(t.side ?? ""),
+          price,
+          size: Number(t.size),
+          outcome: String(t.outcome ?? ""),
+          targetTransactionHash: String(t.transactionHash ?? ""),
+          message: sizeSkip,
+        });
+        return;
       }
-      setWatermarkFromSnapshot(snap2);
-      return;
-    }
 
-    const sorted = await fetchMergedTradesForUserEvent(s.userTrim, s.eventIdNum, COPY_TRADE_FETCH_LIMIT);
-    maybeBroadcastTradesIfChanged(s, sorted);
+      if (cur.dryRun) {
+        // eslint-disable-next-line no-console
+        log.info("[copy:dryRun]", {
+          tokenId,
+          price: t.price,
+          size: orderSize,
+          targetSize: t.size,
+          side: t.side,
+          transactionHash: t.transactionHash,
+        });
+        pushCopyActivity(key, {
+          kind: "simulated",
+          dryRun: true,
+          side: String(t.side ?? ""),
+          price,
+          size: orderSize,
+          outcome: String(t.outcome ?? ""),
+          targetTransactionHash: String(t.transactionHash ?? ""),
+          message: cur.isGlobal ? String(t.title ?? "") : undefined,
+        });
+        return;
+      }
 
-    if (!s.copyEnabled) return;
+      const l2 = cur.l2Client;
+      if (!l2) return;
 
-    for (const t of sorted) {
-      const ts = tradeTimestampSeconds(t.timestamp);
-      const tradeKey = `${ts}:${t.transactionHash}:${t.outcomeIndex}:${t.side}`;
-      const baselineTs = s.lastSeenTimestamp;
-      if (typeof baselineTs === "number" && baselineTs >= 0) {
-        if (ts < baselineTs) continue;
-        if (ts === baselineTs && s.lastSeenTradeKey && tradeKey <= s.lastSeenTradeKey) {
-          continue;
+      let meta = tokenMetaCache.get(tokenId);
+      if (!meta) {
+        const [tickSizeRaw, negRisk] = await Promise.all([
+          clobPublic.getTickSize(tokenId),
+          clobPublic.getNegRisk(tokenId),
+        ]);
+        meta = { tickSize: tickSizeRaw.toString(), negRisk };
+        tokenMetaCache.set(tokenId, meta);
+      }
+      const { tickSize, negRisk } = meta;
+
+      try {
+        // eslint-disable-next-line no-console
+        log.info("[copy:live:from-activity]", {
+          key,
+          activity: {
+            timestamp: tradeTimestampSeconds(t.timestamp),
+            transactionHash: String(t.transactionHash ?? ""),
+            conditionId: String(t.conditionId ?? ""),
+            title: String(t.title ?? ""),
+            side: String(t.side ?? ""),
+            outcome: String(t.outcome ?? ""),
+            outcomeIndex: Number(t.outcomeIndex),
+            price: Number(t.price),
+            size: Number(t.size),
+            asset: String(t.asset ?? ""),
+          },
+          order: {
+            tokenId,
+            side,
+            price,
+            size: orderSize,
+            tickSize,
+            negRisk,
+          },
+        });
+        // createAndPostOrder should return order metadata (varies by clob-client version).
+        const postRes: any = await l2.createAndPostOrder(
+          {
+            tokenID: tokenId,
+            price,
+            size: orderSize,
+            side,
+          },
+          {
+            tickSize: tickSize as any,
+            negRisk,
+          },
+          OrderType.GTC,
+        );
+        // eslint-disable-next-line no-console
+        log.info("[copy:live:post-result]", {
+          funderAddress: process.env.CLOB_FUNDER_ADDRESS?.trim() ?? null,
+          tokenId,
+          order: {
+            side,
+            price,
+            size: orderSize,
+          },
+          postRes,
+        });
+
+        if (postRes?.error) {
+          throw new Error(`${String(postRes.error)}${postRes?.status ? ` (status ${String(postRes.status)})` : ""}`);
+        }
+
+        const orderId = postRes?.orderId ?? postRes?.id ?? postRes?.orderID ?? null;
+        const orderHash = postRes?.orderHash ?? postRes?.hash ?? postRes?.uid ?? null;
+
+        pushCopyActivity(key, {
+          kind: "order_posted",
+          dryRun: false,
+          side: String(t.side ?? ""),
+          price,
+          size: orderSize,
+          outcome: String(t.outcome ?? ""),
+          targetTransactionHash: String(t.transactionHash ?? ""),
+          message:
+            orderId != null
+              ? `Order posted (orderId=${String(orderId)})`
+              : orderHash != null
+                ? `Order posted (hash=${String(orderHash)})`
+                : undefined,
+        });
+      } catch (orderErr: any) {
+        pushCopyActivity(key, {
+          kind: "error",
+          dryRun: false,
+          side: String(t.side ?? ""),
+          price,
+          size: orderSize,
+          outcome: String(t.outcome ?? ""),
+          targetTransactionHash: String(t.transactionHash ?? ""),
+          message: orderErr?.message ?? String(orderErr),
+        });
+      }
+    };
+
+    try {
+      const rows = await fetchLatestTradeActivities({
+        userAddress: s.userTrim,
+        eventId: s.isGlobal ? undefined : s.eventIdNum,
+        maxRows: 50,
+      });
+      // eslint-disable-next-line no-console
+      // log.info(
+      //   `[feed:tick:fetched] key=${key} rows=${rows.length} eventScope=${s.isGlobal ? "global" : s.eventIdNum}`,
+      // );
+
+      if (s.copyEnabled && !s.copyBaselineSent) {
+        s.copyBaselineSent = true;
+        pushCopyActivity(key, {
+          kind: "baseline",
+          dryRun: s.dryRun ?? true,
+          message: `Listening: GET /activity type=TRADE latest=50 (session ${s.copyStartedAtSec}), poll ${s.pollMs}ms.`,
+        });
+      }
+
+      if (!s.copyEnabled) {
+        // Watch mode: always maintain + broadcast the latest target trades.
+        mergeTradesIntoStateAndBroadcast(s, rows);
+        return;
+      }
+
+      const ordered = rows
+        .filter((t) => String(t?.type ?? "").toUpperCase() === "TRADE")
+        .sort((a, b) => tradeTimestampSeconds(a.timestamp) - tradeTimestampSeconds(b.timestamp));
+
+      // Zero point: first tick after /copy/start only seeds dedupe keys (no copying).
+      if (!s.zeroPointSeedDone) {
+        let seeded = 0;
+        for (const t of ordered) {
+          const ck = copyAttemptKey(t);
+          if (s.processedCopyKeys.has(ck)) continue;
+          s.processedCopyKeys.add(ck);
+          trimProcessedCopyKeys(s);
+          seeded++;
+        }
+        s.zeroPointSeedDone = true;
+        // eslint-disable-next-line no-console
+        // log.info(`[feed:tick:seed] key=${key} baselineSeeded=${seeded}/${ordered.length}`);
+        return;
+      }
+
+      const toApply: any[] = [];
+      for (const t of ordered) {
+        const ck = copyAttemptKey(t);
+        if (s.processedCopyKeys.has(ck)) continue;
+        s.processedCopyKeys.add(ck);
+        trimProcessedCopyKeys(s);
+        toApply.push(t);
+      }
+      // eslint-disable-next-line no-console
+      // log.info(
+      //   `[feed:tick:copy-queue] key=${key} ordered=${ordered.length} toApply=${toApply.length} mode=${s.dryRun ? "dry-run" : "live"}`,
+      // );
+
+      if (toApply.length > 0) {
+        // Copy mode: only broadcast trades that are "new since zero-point".
+        mergeTradesIntoStateAndBroadcast(s, toApply);
+      }
+
+      if (s.dryRun === true) {
+        await Promise.all(toApply.map((t) => applyCopyForTrade(t)));
+      } else {
+        for (const t of toApply) {
+          await applyCopyForTrade(t);
         }
       }
-      await applyCopyForTrade(t);
-    }
-  } catch (err: any) {
-    if (s.copyEnabled) {
       // eslint-disable-next-line no-console
-      log.error("[copy] loop error:", err);
-      pushCopyActivity(key, {
-        kind: "error",
-        dryRun: s.dryRun ?? true,
-        message: err?.message ?? String(err),
-      });
-    } else {
-      // eslint-disable-next-line no-console
-      log.error("[feed] loop error:", err);
+      // log.info(`[feed:tick:done] key=${key} applied=${toApply.length}`);
+    } catch (err: any) {
+      if (s.copyEnabled) {
+        // eslint-disable-next-line no-console
+        log.error("[copy] loop error:", err);
+        pushCopyActivity(key, {
+          kind: "error",
+          dryRun: s.dryRun ?? true,
+          message: err?.message ?? String(err),
+        });
+      } else {
+        // eslint-disable-next-line no-console
+        log.error("[feed] loop error:", err);
+      }
     }
+  } finally {
+    const cur = targetFeedLoops.get(key);
+    if (cur) cur.tickInFlight = false;
+    // eslint-disable-next-line no-console
+    // log.info(`[feed:tick:end] key=${key} inFlight=false`);
   }
 }
 
@@ -1220,12 +1582,19 @@ app.get("/api/copy/activity", async (req, res) => {
       targetAddress: z.string().min(1),
       conditionId: z.string().min(1).optional(),
       eventId: z.coerce.number().int().min(1).optional(),
+      global: z.enum(["true", "false"]).optional(),
       limit: z.coerce.number().int().min(1).max(200).optional(),
     })
-    .refine((d) => Boolean(d.conditionId?.trim()) || (d.eventId != null && d.eventId >= 1), {
-      message: "Provide eventId or conditionId",
-      path: ["eventId"],
-    });
+    .refine(
+      (d) =>
+        d.global === "true" ||
+        Boolean(d.conditionId?.trim()) ||
+        (d.eventId != null && d.eventId >= 1),
+      {
+        message: "Provide global=true, eventId, or conditionId",
+        path: ["eventId"],
+      },
+    );
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -1234,6 +1603,7 @@ app.get("/api/copy/activity", async (req, res) => {
       parsed.data.targetAddress,
       parsed.data.conditionId,
       parsed.data.eventId,
+      parsed.data.global === "true",
     );
     const limit = parsed.data.limit ?? 50;
     const events = (copyActivityByKey.get(key) ?? []).slice(0, limit);
@@ -1253,13 +1623,10 @@ async function maybeCreateClobL2Client() {
   const signer = new Wallet(privateKey);
   const tempClient = new ClobClient(CLOB_HOST, CLOB_CHAIN_ID, signer);
 
-  const apiCreds = process.env.CLOB_API_KEY && process.env.CLOB_SECRET && process.env.CLOB_PASSPHRASE
-    ? {
-        apiKey: process.env.CLOB_API_KEY,
-        secret: process.env.CLOB_SECRET,
-        passphrase: process.env.CLOB_PASSPHRASE,
-      }
-    : await tempClient.createOrDeriveApiKey();
+  const apiCreds = await tempClient.createOrDeriveApiKey();
+
+  // Log so you can copy these back into .env if needed
+  log.info("[auth:derived-creds]", JSON.stringify(apiCreds));
 
   const signatureTypeNum = Number(signatureTypeRaw ?? 2);
   // clob-client expects the funder address for authenticated trading.
@@ -1267,25 +1634,49 @@ async function maybeCreateClobL2Client() {
 }
 
 app.post("/api/feed/start", async (req, res) => {
-  const schema = z.object({
-    targetAddress: z.string().min(1),
-    conditionId: z.string().min(1),
-    eventId: z.coerce.number().int().min(1).optional(),
-    pollMs: z.coerce.number().int().min(1000).max(60000).optional(),
-  });
+  const schema = z
+    .object({
+      targetAddress: z.string().min(1),
+      conditionId: z.string().min(1).optional(),
+      eventId: z.coerce.number().int().min(1).optional(),
+      global: z.boolean().optional(),
+      pollMs: z.coerce.number().int().min(200).max(60000).optional(),
+    })
+    .refine((d) => d.global === true || Boolean(d.conditionId?.trim()), {
+      message: "Provide conditionId or global=true",
+      path: ["conditionId"],
+    });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const pollMs = parsed.data.pollMs ?? 5000;
+  const pollMs = parsed.data.pollMs ?? COPY_POLL_MS_DEFAULT;
   const userTrim = parsed.data.targetAddress.trim();
-  const marketTrim = normalizeConditionId(parsed.data.conditionId);
-  let eventIdNum: number;
+  const isGlobal = parsed.data.global === true;
+
+  if (isGlobal) {
+    stopAllFeedLoopsForUser(userTrim);
+  } else {
+    const gk = getGlobalCopyLoopKey(userTrim);
+    const gs = targetFeedLoops.get(gk);
+    if (gs?.timer) clearInterval(gs.timer);
+    targetFeedLoops.delete(gk);
+  }
+
+  let eventIdNum = 0;
+  let marketTrim = "";
+  let key: string;
   try {
-    eventIdNum = await resolveEventIdForCopy(marketTrim, parsed.data.eventId);
+    if (isGlobal) {
+      key = getGlobalCopyLoopKey(userTrim);
+    } else {
+      marketTrim = normalizeConditionId(parsed.data.conditionId!);
+      eventIdNum = await resolveEventIdForCopy(marketTrim, parsed.data.eventId);
+      key = getCopyLoopKey(userTrim, eventIdNum);
+    }
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? String(err) });
   }
-  const key = getCopyLoopKey(userTrim, eventIdNum);
+
   const ex = targetFeedLoops.get(key);
   if (ex?.copyEnabled) {
     return res.json({
@@ -1293,20 +1684,27 @@ app.post("/api/feed/start", async (req, res) => {
       mode: "copy",
       key,
       targetAddress: userTrim,
-      conditionId: marketTrim,
-      eventId: eventIdNum,
+      conditionId: marketTrim || undefined,
+      eventId: isGlobal ? undefined : eventIdNum,
+      global: isGlobal,
       message: "Copy already active; target trades use the same poll loop.",
     });
   }
   if (ex?.timer) clearInterval(ex.timer);
+  const t0 = Math.floor(Date.now() / 1000);
   const state: TargetFeedLoopState = {
     pollMs,
     userTrim,
     eventIdNum,
     marketTrim,
     key,
+    isGlobal,
     copyEnabled: false,
+    copyStartedAtSec: t0,
+    recentTradesForUi: [],
+    processedCopyKeys: new Set(),
     lastTradesFingerprint: ex?.lastTradesFingerprint,
+    zeroPointSeedDone: true,
   };
   targetFeedLoops.set(key, state);
   void runTargetFeedTick(key);
@@ -1316,8 +1714,9 @@ app.post("/api/feed/start", async (req, res) => {
     mode: "watch",
     key,
     targetAddress: userTrim,
-    conditionId: marketTrim,
-    eventId: eventIdNum,
+    conditionId: marketTrim || undefined,
+    eventId: isGlobal ? undefined : eventIdNum,
+    global: isGlobal,
   });
 });
 
@@ -1327,11 +1726,18 @@ app.post("/api/feed/stop", async (req, res) => {
       targetAddress: z.string().min(1),
       conditionId: z.string().min(1).optional(),
       eventId: z.coerce.number().int().min(1).optional(),
+      global: z.boolean().optional(),
     })
-    .refine((d) => Boolean(d.conditionId?.trim()) || (d.eventId != null && d.eventId >= 1), {
-      message: "Provide eventId or conditionId",
-      path: ["eventId"],
-    });
+    .refine(
+      (d) =>
+        d.global === true ||
+        Boolean(d.conditionId?.trim()) ||
+        (d.eventId != null && d.eventId >= 1),
+      {
+        message: "Provide global=true, eventId, or conditionId",
+        path: ["eventId"],
+      },
+    );
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -1341,6 +1747,7 @@ app.post("/api/feed/stop", async (req, res) => {
       parsed.data.targetAddress,
       parsed.data.conditionId,
       parsed.data.eventId,
+      parsed.data.global === true,
     );
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? String(err) });
@@ -1356,13 +1763,18 @@ app.post("/api/copy/start", async (req, res) => {
   const schema = z
     .object({
       targetAddress: z.string().min(1),
-      conditionId: z.string().min(1),
+      conditionId: z.string().min(1).optional(),
       eventId: z.coerce.number().int().min(1).optional(),
-      pollMs: z.coerce.number().int().min(1000).max(60000).optional(),
+      global: z.boolean().optional(),
+      pollMs: z.coerce.number().int().min(200).max(60000).optional(),
       dryRun: z.boolean().optional().default(true),
       copySizePercent: z.coerce.number().min(0.01).max(10_000).optional().default(100),
       minCopySize: z.number().min(5).optional(),
       maxCopySize: z.number().positive().optional(),
+    })
+    .refine((d) => d.global === true || Boolean(d.conditionId?.trim()), {
+      message: "Provide conditionId or global=true",
+      path: ["conditionId"],
     })
     .refine((d) => !(d.minCopySize != null && d.maxCopySize != null) || d.maxCopySize > d.minCopySize, {
       message: "maxCopySize must be greater than minCopySize",
@@ -1372,23 +1784,39 @@ app.post("/api/copy/start", async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { pollMs = 5000, dryRun, copySizePercent, minCopySize, maxCopySize } = parsed.data;
+  const { pollMs = COPY_POLL_MS_DEFAULT, dryRun, copySizePercent, minCopySize, maxCopySize } = parsed.data;
   const copySizing: CopySizingOptions = {
     sizePercent: copySizePercent,
     minSize: minCopySize,
     maxSize: maxCopySize,
   };
   const userTrim = parsed.data.targetAddress.trim();
-  const marketTrim = normalizeConditionId(parsed.data.conditionId);
+  const isGlobal = parsed.data.global === true;
 
-  let eventIdNum: number;
+  if (isGlobal) {
+    stopAllFeedLoopsForUser(userTrim);
+  } else {
+    const gk = getGlobalCopyLoopKey(userTrim);
+    const gs = targetFeedLoops.get(gk);
+    if (gs?.timer) clearInterval(gs.timer);
+    targetFeedLoops.delete(gk);
+  }
+
+  let eventIdNum = 0;
+  let marketTrim = "";
+  let key: string;
   try {
-    eventIdNum = await resolveEventIdForCopy(marketTrim, parsed.data.eventId);
+    if (isGlobal) {
+      key = getGlobalCopyLoopKey(userTrim);
+    } else {
+      marketTrim = normalizeConditionId(parsed.data.conditionId!);
+      eventIdNum = await resolveEventIdForCopy(marketTrim, parsed.data.eventId);
+      key = getCopyLoopKey(userTrim, eventIdNum);
+    }
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? String(err) });
   }
 
-  const key = getCopyLoopKey(userTrim, eventIdNum);
   const existing = targetFeedLoops.get(key);
   if (existing?.timer) clearInterval(existing.timer);
   copyActivityByKey.delete(key);
@@ -1397,6 +1825,15 @@ app.post("/api/copy/start", async (req, res) => {
   if (!dryRun) {
     try {
       l2Client = await maybeCreateClobL2Client();
+
+      try {
+        const keys = await l2Client.getApiKeys();
+        log.info("keys", keys);
+        log.info("[auth:check]", JSON.stringify(keys));
+      } catch (e: any) {
+        log.error("[auth:check:failed]", e?.message ?? e);
+      }
+
       if (!l2Client) {
         return res.status(400).json({ error: "Auto-copy requested but CLOB_PRIVATE_KEY and CLOB_FUNDER_ADDRESS are not set." });
       }
@@ -1405,23 +1842,30 @@ app.post("/api/copy/start", async (req, res) => {
     }
   }
 
-  const mapping = await mapConditionIdToUpDown(marketTrim);
+  let mapping: MarketMapping | undefined;
+  if (!isGlobal) {
+    mapping = await mapConditionIdToUpDown(marketTrim);
+  }
 
+  const t0 = Math.floor(Date.now() / 1000);
   const state: TargetFeedLoopState = {
     pollMs,
     userTrim,
     eventIdNum,
     marketTrim,
     key,
+    isGlobal,
     copyEnabled: true,
-    zeroPointDone: undefined,
-    lastSeenTimestamp: undefined,
-    lastSeenTradeKey: undefined,
+    copyStartedAtSec: t0,
+    recentTradesForUi: [],
+    processedCopyKeys: new Set(),
     dryRun,
     copySizing,
     mapping,
+    mappingByCondition: isGlobal ? new Map() : undefined,
     l2Client,
     lastTradesFingerprint: existing?.lastTradesFingerprint,
+    zeroPointSeedDone: false,
   };
   targetFeedLoops.set(key, state);
   void runTargetFeedTick(key);
@@ -1432,8 +1876,9 @@ app.post("/api/copy/start", async (req, res) => {
     running: true,
     key,
     targetAddress: userTrim,
-    conditionId: marketTrim,
-    eventId: eventIdNum,
+    conditionId: marketTrim || undefined,
+    eventId: isGlobal ? undefined : eventIdNum,
+    global: isGlobal,
   });
 });
 
@@ -1443,12 +1888,19 @@ app.post("/api/copy/stop", async (req, res) => {
       targetAddress: z.string().min(1),
       conditionId: z.string().min(1).optional(),
       eventId: z.coerce.number().int().min(1).optional(),
+      global: z.boolean().optional(),
       fullStop: z.boolean().optional().default(false),
     })
-    .refine((d) => Boolean(d.conditionId?.trim()) || (d.eventId != null && d.eventId >= 1), {
-      message: "Provide eventId or conditionId",
-      path: ["eventId"],
-    });
+    .refine(
+      (d) =>
+        d.global === true ||
+        Boolean(d.conditionId?.trim()) ||
+        (d.eventId != null && d.eventId >= 1),
+      {
+        message: "Provide global=true, eventId, or conditionId",
+        path: ["eventId"],
+      },
+    );
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -1458,6 +1910,7 @@ app.post("/api/copy/stop", async (req, res) => {
       parsed.data.targetAddress,
       parsed.data.conditionId,
       parsed.data.eventId,
+      parsed.data.global === true,
     );
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? String(err) });
@@ -1479,13 +1932,18 @@ app.post("/api/copy/stop", async (req, res) => {
   }
 
   s.copyEnabled = false;
-  s.zeroPointDone = undefined;
-  s.lastSeenTimestamp = undefined;
-  s.lastSeenTradeKey = undefined;
   s.dryRun = undefined;
   s.copySizing = undefined;
   s.mapping = undefined;
+  s.mappingByCondition = undefined;
   s.l2Client = null;
+  s.copyBaselineSent = undefined;
+  s.processedCopyKeys = new Set();
+  s.zeroPointSeedDone = false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  s.copyStartedAtSec = nowSec;
+  s.recentTradesForUi = [];
+  s.lastTradesFingerprint = undefined;
 
   if (!s.timer) {
     s.timer = setInterval(() => void runTargetFeedTick(key), s.pollMs);
@@ -1496,7 +1954,7 @@ app.post("/api/copy/stop", async (req, res) => {
 
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   // eslint-disable-next-line no-console
-  log.error(err);
+  console.error(err);
   res.status(500).json({ error: err?.message ?? "Internal server error" });
 });
 
@@ -1531,6 +1989,24 @@ server.on("upgrade", (request, socket, head) => {
 
     if (url.pathname === "/api/copy/ws") {
       const targetAddress = url.searchParams.get("targetAddress")?.trim();
+      const globalWs =
+        url.searchParams.get("global") === "1" || url.searchParams.get("global") === "true";
+      if (globalWs) {
+        if (!targetAddress) {
+          socket.destroy();
+          return;
+        }
+        const loopKey = getGlobalCopyLoopKey(targetAddress);
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          subscribeCopyActivityWs(loopKey, ws);
+          try {
+            ws.send(JSON.stringify({ type: "subscribed", key: loopKey, global: true }));
+          } catch {
+            // ignore
+          }
+        });
+        return;
+      }
       const eventIdStr = url.searchParams.get("eventId");
       const eventId = eventIdStr != null ? Number(eventIdStr) : NaN;
       if (!targetAddress || !Number.isFinite(eventId) || eventId < 1) {

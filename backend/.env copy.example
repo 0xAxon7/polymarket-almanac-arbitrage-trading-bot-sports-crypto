@@ -20,8 +20,4 @@ CLOB_SIGNATURE_TYPE=2
 # Funder/proxy address where the funds sit (required for many users)
 CLOB_FUNDER_ADDRESS=
 
-# If you already have L2 API credentials, you can provide them directly (optional).
-CLOB_API_KEY=
-CLOB_SECRET=
-CLOB_PASSPHRASE=
 
